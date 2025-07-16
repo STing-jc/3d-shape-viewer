@@ -32,6 +32,47 @@
             max-height: calc(100vh - 40px);
             overflow-y: auto;
             overflow-x: hidden;
+            transition: all 0.3s ease;
+        }
+        
+        #controls.minimized {
+            width: 50px;
+            min-width: 50px;
+            padding: 10px;
+            overflow: hidden;
+        }
+        
+        #controls.minimized .control-content {
+            display: none;
+        }
+        
+        #controls.minimized .minimize-btn {
+            right: 5px;
+            top: 5px;
+        }
+        
+        .minimize-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            cursor: pointer;
+            font-size: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+            z-index: 101;
+        }
+        
+        .minimize-btn:hover {
+            background: #5a52d5;
+            transform: scale(1.1);
         }
         
         .control-group {
@@ -88,6 +129,34 @@
             padding: 10px;
             border-radius: 5px;
             font-size: 12px;
+            transition: all 0.3s ease;
+            min-width: 200px;
+        }
+        
+        #info.minimized {
+            width: 50px;
+            min-width: 50px;
+            height: 50px;
+            padding: 5px;
+            overflow: hidden;
+        }
+        
+        #info.minimized .info-content {
+            display: none;
+        }
+        
+        #info.minimized .minimize-btn {
+            right: 5px;
+            top: 5px;
+        }
+        
+        #info .minimize-btn {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+        }
+        
+        #info .minimize-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
         }
         
         .section-title {
@@ -185,6 +254,31 @@
             border-radius: 5px;
             transition: all 0.2s ease;
             box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            position: relative;
+        }
+        
+        .config-item.folder-item {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-left: 4px solid #007bff;
+            font-weight: bold;
+        }
+        
+        .config-item.file-item {
+            margin-left: 20px;
+            border-left: 2px solid #dee2e6;
+            background: #fdfdfd;
+        }
+        
+        .config-item.file-item::before {
+            content: "📄";
+            margin-right: 8px;
+            font-size: 14px;
+        }
+        
+        .config-item.folder-item::before {
+            content: "📁";
+            margin-right: 8px;
+            font-size: 14px;
         }
         
         .config-item:hover {
@@ -256,14 +350,15 @@
         
         .config-management-buttons {
             display: flex;
+            flex-direction: column;
             gap: 5px;
             margin-bottom: 10px;
         }
         
         .config-management-buttons button {
-            flex: 1;
+            width: 100%;
             padding: 8px;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: bold;
             border-radius: 5px;
             transition: all 0.2s ease;
@@ -277,11 +372,19 @@
             background: linear-gradient(45deg, #0056b3, #004085);
         }
         
-        #loadConfig {
+        #loadSingleConfig {
+            background: linear-gradient(45deg, #28a745, #20c997);
+        }
+        
+        #loadSingleConfig:hover {
+            background: linear-gradient(45deg, #20c997, #1ea085);
+        }
+        
+        #loadConfigFolder {
             background: linear-gradient(45deg, #6f42c1, #5a2d91);
         }
         
-        #loadConfig:hover {
+        #loadConfigFolder:hover {
             background: linear-gradient(45deg, #5a2d91, #4c1f78);
         }
     </style>
@@ -414,6 +517,8 @@
         </div>
         
         <div id="controls">
+            <button class="minimize-btn" id="controlsMinimizeBtn" title="最小化/展开工具栏">−</button>
+            <div class="control-content">
             <div class="section-title">🎯 图形选择</div>
             <div class="control-group">
                 <label for="shapeSelect">选择立体图形:</label>
@@ -463,6 +568,43 @@
                 <button id="toggleAttach">附着工具</button>
                 <button id="toggleMove">移动模式</button>
                 <button id="clearCutting">清除切割平面</button>
+            </div>
+            
+            <div class="control-group">
+                <button id="toggleBoolean" style="background: linear-gradient(45deg, #e74c3c, #c0392b); color: white; width: 100%; padding: 8px; font-weight: bold;">🔧 布尔运算</button>
+            </div>
+            
+            <div class="control-group" id="booleanPanel" style="display: none;">
+                <label>布尔运算操作:</label>
+                <div style="border: 1px solid #ddd; border-radius: 5px; padding: 8px; background: #f8f9fa;">
+                    <div style="margin-bottom: 8px;">
+                        <label style="font-size: 12px; color: #666;">选择两个图形进行布尔运算</label>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">主体图形 (被挖空的图形):</label>
+                        <select id="booleanMainShape" style="width: 100%; padding: 4px; margin-top: 2px;">
+                            <option value="">请选择主体图形</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">工具图形 (用来挖空的图形):</label>
+                        <select id="booleanToolShape" style="width: 100%; padding: 4px; margin-top: 2px;">
+                            <option value="">请选择工具图形</option>
+                        </select>
+                    </div>
+                    <div style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">运算类型:</label>
+                        <select id="booleanOperation" style="width: 100%; padding: 4px; margin-top: 2px;">
+                            <option value="subtract">减法 (挖空)</option>
+                            <option value="union">并集 (合并)</option>
+                            <option value="intersect">交集 (相交部分)</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; gap: 5px; margin-top: 8px;">
+                        <button id="executeBoolean" style="flex: 1; background: #28a745; color: white; border: none; padding: 8px; border-radius: 3px; font-size: 12px;">执行运算</button>
+                        <button id="cancelBoolean" style="flex: 1; background: #6c757d; color: white; border: none; padding: 8px; border-radius: 3px; font-size: 12px;">取消</button>
+                    </div>
+                </div>
             </div>
             
             <div class="control-group">
@@ -552,6 +694,20 @@
                         </div>
                     </div>
                     <div style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">快速设置切割方向:</label>
+                        <div style="display: flex; gap: 5px; margin-top: 5px;">
+                            <button id="setNormalX" 
+                                    style="flex: 1; background: #dc3545; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 11px; user-select: none;"
+                                    title="设置X轴切割">X轴切割</button>
+                            <button id="setNormalY" 
+                                    style="flex: 1; background: #28a745; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 11px; user-select: none;"
+                                    title="设置Y轴切割">Y轴切割</button>
+                            <button id="setNormalZ" 
+                                    style="flex: 1; background: #007bff; color: white; border: none; padding: 5px; border-radius: 3px; font-size: 11px; user-select: none;"
+                                    title="设置Z轴切割">Z轴切割</button>
+                        </div>
+                    </div>
+                    <div style="margin-bottom: 8px;">
                         <label style="font-size: 12px;">切割平面旋转:</label>
                         <div style="display: flex; gap: 5px; margin-top: 5px;">
                             <button id="rotateCuttingPlaneX" 
@@ -624,8 +780,10 @@
             <div class="control-group">
                 <div class="config-management-buttons">
                     <button id="saveConfig">保存当前配置</button>
-                    <button id="loadConfig">选择配置文件夹</button>
+                    <button id="loadSingleConfig">选择单个配置文件</button>
+                    <button id="loadConfigFolder">选择配置文件夹</button>
                 </div>
+                <input type="file" id="singleConfigInput" style="display: none;" accept=".json">
                 <input type="file" id="configFolderInput" webkitdirectory directory multiple style="display: none;" accept=".json">
             </div>
             
@@ -658,19 +816,23 @@
                             title="应用到所有图形">应用到所有</button>
                 </div>
             </div>
+            </div>
         </div>
         
         <div id="info">
-            <strong>操作说明:</strong><br>
-            • 鼠标左键拖拽: 旋转视角<br>
-            • 鼠标滚轮: 缩放<br>
-            • 鼠标右键拖拽: 平移视角<br>
-            • 点击图形: 选择图形<br>
-            • Delete键: 删除选中图形<br>
-            • Ctrl+C: 复制选中图形<br>
-            • Ctrl+Z/Y: 撤销/重做操作<br>
-            • 切割模式: 点击图形表面创建切割平面<br>
-            • 附着模式: 在选中图形上添加新图形
+            <button class="minimize-btn" id="infoMinimizeBtn" title="最小化/展开操作提示">−</button>
+            <div class="info-content">
+                <strong>操作说明:</strong><br>
+                • 鼠标左键拖拽: 旋转视角<br>
+                • 鼠标滚轮: 缩放<br>
+                • 鼠标右键拖拽: 平移视角<br>
+                • 点击图形: 选择图形<br>
+                • Delete键: 删除选中图形<br>
+                • Ctrl+C: 复制选中图形<br>
+                • Ctrl+Z/Y: 撤销/重做操作<br>
+                • 切割模式: 点击图形表面创建切割平面<br>
+                • 附着模式: 在选中图形上添加新图形
+            </div>
         </div>
     </div>
     

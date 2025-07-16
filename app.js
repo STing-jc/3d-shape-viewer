@@ -30,6 +30,12 @@ class Shape3DViewer {
         this.moveMode = false; // 移动模式
         this.uniformScaleMode = false; // 等比缩放模式
         
+        // 布尔运算相关
+        this.booleanMode = false; // 布尔运算模式
+        this.booleanMainShape = null; // 主体图形
+        this.booleanToolShape = null; // 工具图形
+        this.booleanOperation = 'subtract'; // 运算类型：subtract, union, intersect
+        
         // 移动设备检测和性能优化
         this.isMobile = this.detectMobileDevice();
         this.performanceMode = this.isMobile ? 'mobile' : 'desktop';
@@ -455,14 +461,18 @@ class Shape3DViewer {
         // 标准化法向量（如果不为零向量）
         if (normal.length() > 0.001) {
             normal.normalize();
-            this.activeCuttingPlane = new THREE.Plane(normal, -normal.dot(position));
-            
-            // 更新可视化
-            this.updateCuttingPlaneVisualization();
-            
-            // 应用切割预览
-            this.previewActiveCuttingPlane();
+        } else {
+            // 如果法向量太小，使用默认的 X 轴法向量
+            normal.set(1, 0, 0);
         }
+        
+        this.activeCuttingPlane = new THREE.Plane(normal, -normal.dot(position));
+        
+        // 更新可视化
+        this.updateCuttingPlaneVisualization();
+        
+        // 应用切割预览
+        this.previewActiveCuttingPlane();
     }
     
     previewActiveCuttingPlane() {
@@ -492,6 +502,12 @@ class Shape3DViewer {
     applyCuttingPlaneFromControls() {
         if (!this.activeCuttingPlane) return;
         
+        // 保存所有图形的切割前状态
+        const beforeStates = new Map();
+        this.shapes.forEach((mesh, id) => {
+            beforeStates.set(id, this.saveShapeState(mesh));
+        });
+        
         // 对所有图形进行真正的几何切割
         this.shapes.forEach((mesh, id) => {
             this.performGeometryCutting(mesh, this.activeCuttingPlane);
@@ -504,6 +520,19 @@ class Shape3DViewer {
                     this.performGeometryCutting(child, this.activeCuttingPlane);
                 }
             });
+        });
+        
+        // 保存所有图形的切割后状态并记录历史
+        const afterStates = new Map();
+        this.shapes.forEach((mesh, id) => {
+            afterStates.set(id, this.saveShapeState(mesh));
+        });
+        
+        this.addToHistory({
+            type: 'cutting',
+            beforeStates: beforeStates,
+            afterStates: afterStates,
+            cuttingPlane: this.activeCuttingPlane.clone()
         });
         
         // 将切割平面添加到历史记录（用于撤销功能）
@@ -532,6 +561,52 @@ class Shape3DViewer {
         document.getElementById('cuttingNormalX').value = 1;
         document.getElementById('cuttingNormalY').value = 0;
         document.getElementById('cuttingNormalZ').value = 0;
+        
+        // 更新切割平面
+        this.updateCuttingPlaneFromControls();
+    }
+    
+    // 快速设置切割方向
+    setQuickCuttingDirection(axis) {
+        if (!this.cuttingPlaneAdjustMode) {
+            this.showTooltip('请先启用切割工具', 1500);
+            return;
+        }
+        
+        // 重置位置到原点
+        document.getElementById('cuttingPosX').value = 0;
+        document.getElementById('cuttingPosY').value = 0;
+        document.getElementById('cuttingPosZ').value = 0;
+        
+        // 设置法向量
+        switch(axis) {
+            case 'x':
+                document.getElementById('cuttingNormalX').value = 1;
+                document.getElementById('cuttingNormalY').value = 0;
+                document.getElementById('cuttingNormalZ').value = 0;
+                this.showTooltip('已设置为X轴切割', 1000);
+                break;
+            case 'y':
+                document.getElementById('cuttingNormalX').value = 0;
+                document.getElementById('cuttingNormalY').value = 1;
+                document.getElementById('cuttingNormalZ').value = 0;
+                this.showTooltip('已设置为Y轴切割', 1000);
+                break;
+            case 'z':
+                document.getElementById('cuttingNormalX').value = 0;
+                document.getElementById('cuttingNormalY').value = 0;
+                document.getElementById('cuttingNormalZ').value = 1;
+                this.showTooltip('已设置为Z轴切割', 1000);
+                break;
+        }
+        
+        // 同步数值输入框
+        document.getElementById('cuttingPosXInput').value = 0;
+        document.getElementById('cuttingPosYInput').value = 0;
+        document.getElementById('cuttingPosZInput').value = 0;
+        document.getElementById('cuttingNormalXInput').value = document.getElementById('cuttingNormalX').value;
+        document.getElementById('cuttingNormalYInput').value = document.getElementById('cuttingNormalY').value;
+        document.getElementById('cuttingNormalZInput').value = document.getElementById('cuttingNormalZ').value;
         
         // 更新切割平面
         this.updateCuttingPlaneFromControls();
@@ -937,13 +1012,15 @@ class Shape3DViewer {
          if (intersects.length > 0) {
              const selectedObject = intersects[0].object;
              
-             // 如果不在切割模式或附着模式，启用拖拽
-             if (!this.cuttingMode && !this.attachMode) {
+             // 只有在移动模式下且不在切割模式或附着模式时，才启用拖拽
+             if (this.moveMode && !this.cuttingMode && !this.attachMode) {
                  this.isDragging = true;
                  this.selectedShape = selectedObject;
                  
+                 // 保存拖拽开始时的状态
+                 this.dragStartState = this.saveShapeState(selectedObject);
+                 
                  // 在移动模式下，总是禁用轨道控制器
-                 // 在普通模式下，只有拖拽时才禁用轨道控制器
                  this.controls.enabled = false;
                  
                  // 保存原始缩放值
@@ -988,10 +1065,23 @@ class Shape3DViewer {
              // 使用偏移量来计算新位置，避免图形跳跃
              const newPosition = intersectionPoint.clone().add(this.dragOffset);
              
-             // 限制图形在网格范围内移动
-             newPosition.x = Math.max(0, Math.min(20, newPosition.x));
-             newPosition.y = Math.max(0, newPosition.y);
-             newPosition.z = Math.max(0, Math.min(20, newPosition.z));
+             // 计算图形的边界框以确保完全在网格范围内
+             const box = new THREE.Box3().setFromObject(this.selectedShape);
+             const size = box.getSize(new THREE.Vector3());
+             
+             // 计算安全的移动范围（考虑图形尺寸）
+             const halfSizeX = size.x / 2;
+             const halfSizeZ = size.z / 2;
+             const gridSize = 20; // 网格大小
+             const margin = 0.5; // 边距
+             
+             // 限制图形在网格范围内移动，确保图形不超出边界
+             newPosition.x = Math.max(halfSizeX + margin, Math.min(gridSize - halfSizeX - margin, newPosition.x));
+             // Y轴限制：确保图形底部不低于地面，顶部不超出合理高度
+             const minY = size.y / 2; // 图形底部不低于地面
+             const maxY = gridSize; // 图形顶部不超出网格高度
+             newPosition.y = Math.max(minY, Math.min(maxY - size.y / 2, newPosition.y));
+             newPosition.z = Math.max(halfSizeZ + margin, Math.min(gridSize - halfSizeZ - margin, newPosition.z));
              
              this.selectedShape.position.copy(newPosition);
              
@@ -1004,9 +1094,9 @@ class Shape3DViewer {
              }
              
              // 更新选择框位置 - 重新创建选择框以避免缩放问题
-             const box = this.scene.getObjectByName('selectionBox');
-             if (box) {
-                 this.scene.remove(box);
+             const selectionBox = this.scene.getObjectByName('selectionBox');
+             if (selectionBox) {
+                 this.scene.remove(selectionBox);
                  const newBox = new THREE.BoxHelper(this.selectedShape, 0xffff00);
                  newBox.name = 'selectionBox';
                  this.scene.add(newBox);
@@ -1021,9 +1111,21 @@ class Shape3DViewer {
      
      handleMouseUp(event) {
          if (this.isDragging) {
+             // 记录移动操作到历史
+             if (this.selectedShape && this.dragStartState) {
+                 const endState = this.saveShapeState(this.selectedShape);
+                 this.addToHistory({
+                     type: 'move',
+                     shapeId: this.selectedShape.userData.id,
+                     beforeState: this.dragStartState,
+                     afterState: endState
+                 });
+             }
+             
              this.isDragging = false;
              this.dragPlane = null;
              this.dragOffset = null;
+             this.dragStartState = null;
              
              // 只有在非移动模式下才重新启用轨道控制器
              if (!this.moveMode) {
@@ -1084,8 +1186,8 @@ class Shape3DViewer {
     deselectShape() {
         if (this.selectedShape) {
             // 移除选择框
-            const box = this.scene.getObjectByName('selectionBox');
-            if (box) this.scene.remove(box);
+            const selectionBox = this.scene.getObjectByName('selectionBox');
+            if (selectionBox) this.scene.remove(selectionBox);
             this.selectedShape = null;
             
             // 隐藏大小控制面板
@@ -1398,6 +1500,12 @@ class Shape3DViewer {
             finalPlane.constant = -finalPlane.constant;
         }
         
+        // 保存所有图形的切割前状态
+        const beforeStates = new Map();
+        this.shapes.forEach((mesh, id) => {
+            beforeStates.set(id, this.saveShapeState(mesh));
+        });
+        
         // 对所有图形进行真正的几何切割
         this.shapes.forEach((mesh, id) => {
             this.performGeometryCutting(mesh, finalPlane);
@@ -1410,6 +1518,19 @@ class Shape3DViewer {
                     this.performGeometryCutting(child, finalPlane);
                 }
             });
+        });
+        
+        // 保存所有图形的切割后状态并记录历史
+        const afterStates = new Map();
+        this.shapes.forEach((mesh, id) => {
+            afterStates.set(id, this.saveShapeState(mesh));
+        });
+        
+        this.addToHistory({
+            type: 'cutting',
+            beforeStates: beforeStates,
+            afterStates: afterStates,
+            cuttingPlane: finalPlane.clone()
         });
         
         // 将切割平面添加到历史记录（用于撤销功能）
@@ -1434,14 +1555,42 @@ class Shape3DViewer {
     createAttachedShape(shapeType) {
         if (!this.attachPoint) return;
         
-        // 计算附着位置（稍微偏移以避免重叠）
-        const offset = this.attachPoint.normal.clone().multiplyScalar(1.5);
+        // 先创建一个临时图形来获取尺寸信息
+        let tempGeometry;
+        switch (shapeType) {
+            case 'cube': tempGeometry = new THREE.BoxGeometry(2, 2, 2); break;
+            case 'sphere': tempGeometry = new THREE.SphereGeometry(1.5, 32, 32); break;
+            case 'cylinder': tempGeometry = new THREE.CylinderGeometry(1, 1, 3, 32); break;
+            case 'cone': tempGeometry = new THREE.ConeGeometry(1.5, 3, 32); break;
+            case 'pyramid': tempGeometry = new THREE.ConeGeometry(1.5, 3, 4); break;
+            case 'torus': tempGeometry = new THREE.TorusGeometry(1.5, 0.5, 16, 100); break;
+            case 'dodecahedron': tempGeometry = new THREE.DodecahedronGeometry(1.5); break;
+            case 'icosahedron': tempGeometry = new THREE.IcosahedronGeometry(1.5); break;
+            default: tempGeometry = new THREE.BoxGeometry(2, 2, 2);
+        }
+        
+        // 计算图形的边界框
+        tempGeometry.computeBoundingBox();
+        const size = tempGeometry.boundingBox.getSize(new THREE.Vector3());
+        
+        // 计算附着位置（根据图形尺寸调整偏移）
+        const offsetDistance = Math.max(size.x, size.y, size.z) / 2 + 0.5;
+        const offset = this.attachPoint.normal.clone().multiplyScalar(offsetDistance);
         const attachPosition = this.attachPoint.position.clone().add(offset);
         
-        // 确保附着的图形在网格范围内
-        attachPosition.x = Math.max(1, Math.min(19, attachPosition.x));
-        attachPosition.y = Math.max(1, attachPosition.y);
-        attachPosition.z = Math.max(1, Math.min(19, attachPosition.z));
+        // 确保附着的图形完全在网格范围内
+        const gridSize = 20;
+        const margin = 0.5;
+        const halfSizeX = size.x / 2;
+        const halfSizeY = size.y / 2;
+        const halfSizeZ = size.z / 2;
+        
+        attachPosition.x = Math.max(halfSizeX + margin, Math.min(gridSize - halfSizeX - margin, attachPosition.x));
+        attachPosition.y = Math.max(halfSizeY + margin, attachPosition.y);
+        attachPosition.z = Math.max(halfSizeZ + margin, Math.min(gridSize - halfSizeZ - margin, attachPosition.z));
+        
+        // 清理临时几何体
+        tempGeometry.dispose();
         
         const newShape = this.createShape(shapeType, attachPosition);
         
@@ -1451,6 +1600,8 @@ class Shape3DViewer {
         
         this.attachPoint = null;
         this.toggleAttachMode(); // 退出附着模式
+        
+        this.showTooltip('图形已附着', 1500);
     }
     
     toggleCuttingMode() {
@@ -1682,36 +1833,60 @@ class Shape3DViewer {
         }
     }
     
-    createShape(shapeType, position = new THREE.Vector3(10, 1, 10)) {
+    createShape(shapeType, position = null) {
         let geometry;
+        let shapeHeight = 2; // 默认高度
         
         switch (shapeType) {
             case 'cube':
                 geometry = new THREE.BoxGeometry(2, 2, 2);
+                shapeHeight = 2;
                 break;
             case 'sphere':
                 geometry = new THREE.SphereGeometry(1.5, 32, 32);
+                shapeHeight = 3; // 直径
                 break;
             case 'cylinder':
                 geometry = new THREE.CylinderGeometry(1, 1, 3, 32);
+                shapeHeight = 3;
                 break;
             case 'cone':
                 geometry = new THREE.ConeGeometry(1.5, 3, 32);
+                shapeHeight = 3;
                 break;
             case 'pyramid':
                 geometry = new THREE.ConeGeometry(1.5, 3, 4);
+                shapeHeight = 3;
                 break;
             case 'torus':
                 geometry = new THREE.TorusGeometry(1.5, 0.5, 16, 100);
+                shapeHeight = 1; // 环面高度较小
                 break;
             case 'dodecahedron':
                 geometry = new THREE.DodecahedronGeometry(1.5);
+                shapeHeight = 3; // 近似高度
                 break;
             case 'icosahedron':
                 geometry = new THREE.IcosahedronGeometry(1.5);
+                shapeHeight = 3; // 近似高度
                 break;
             default:
                 geometry = new THREE.BoxGeometry(2, 2, 2);
+                shapeHeight = 2;
+        }
+        
+        // 如果没有指定位置，计算安全的默认位置
+        if (!position) {
+            // 确保图形底部不低于网格，顶部不超出合理范围
+            const safeY = Math.max(shapeHeight / 2, 1); // 至少离地面1单位
+            // 在网格中心附近随机放置，避免重叠
+            const offsetX = (Math.random() - 0.5) * 6; // -3到3的随机偏移
+            const offsetZ = (Math.random() - 0.5) * 6; // -3到3的随机偏移
+            position = new THREE.Vector3(10 + offsetX, safeY, 10 + offsetZ);
+            
+            // 确保位置在网格范围内（留出边距）
+            position.x = Math.max(2, Math.min(18, position.x));
+            position.z = Math.max(2, Math.min(18, position.z));
         }
         
         const material = this.createMaterial();
@@ -1725,7 +1900,8 @@ class Shape3DViewer {
             id: ++this.shapeCounter,
             type: shapeType,
             created: new Date().toLocaleTimeString(),
-            originalScale: mesh.scale.clone() // 保存原始缩放值
+            originalScale: mesh.scale.clone(), // 保存原始缩放值
+            isRainbow: material.userData && material.userData.isRainbow // 标记是否为彩虹颜色
         };
         
         // 应用所有切割平面
@@ -1788,6 +1964,7 @@ class Shape3DViewer {
         
         if (selectedColor === 'rainbow') {
             material.color = new THREE.Color().setHSL(Math.random(), 0.7, 0.6);
+            material.userData = { isRainbow: true };
         }
         
         return material;
@@ -1968,10 +2145,37 @@ class Shape3DViewer {
             // 将颜色值转换为THREE.Color
             mesh.material.color.setHex(parseInt(colorValue.replace('#', '0x')));
             
+            // 清除彩虹标记，因为用户手动设置了颜色
+            mesh.userData.isRainbow = false;
+            
             // 如果是选中的图形，显示提示
             if (this.selectedShape === mesh) {
                 this.showTooltip(`已更新图形 #${shapeId} 的颜色`, 1500);
             }
+            
+            // 更新图形列表显示
+            this.updateShapesList();
+        }
+    }
+    
+    setShapeRainbow(shapeId) {
+        const mesh = this.shapes.get(shapeId);
+        if (mesh && mesh.material) {
+            // 切换彩虹状态
+            mesh.userData.isRainbow = !mesh.userData.isRainbow;
+            
+            if (mesh.userData.isRainbow) {
+                // 设置为彩虹颜色，初始化一个随机的HSL颜色
+                mesh.material.color.setHSL(Math.random(), 0.7, 0.6);
+                this.showTooltip(`图形 #${shapeId} 已设置为彩虹颜色`, 1500);
+            } else {
+                // 取消彩虹，设置为默认蓝色
+                mesh.material.color.setHex(0x3742fa);
+                this.showTooltip(`图形 #${shapeId} 已取消彩虹颜色`, 1500);
+            }
+            
+            // 更新图形列表显示
+            this.updateShapesList();
         }
     }
     
@@ -1996,21 +2200,82 @@ class Shape3DViewer {
     
     duplicateShape() {
         if (this.selectedShape) {
-            const offset = new THREE.Vector3(2, 0, 0);
-            const newPosition = this.selectedShape.position.clone().add(offset);
+            // 计算原图形的边界框
+            const originalBox = new THREE.Box3().setFromObject(this.selectedShape);
+            const originalSize = originalBox.getSize(new THREE.Vector3());
             
-            // 确保复制的图形位置在网格范围内
-            newPosition.x = Math.max(1, Math.min(19, newPosition.x));
-            newPosition.y = Math.max(1, newPosition.y);
-            newPosition.z = Math.max(1, Math.min(19, newPosition.z));
+            // 尝试在右侧放置，如果空间不够则尝试其他方向
+            const gridSize = 20;
+            const margin = 0.5;
+            let offset = new THREE.Vector3(originalSize.x + 1, 0, 0); // 右侧
+            let newPosition = this.selectedShape.position.clone().add(offset);
             
-            const newShape = this.createShape(this.selectedShape.userData.type, newPosition);
-            
-            // 如果原始图形有保存的缩放值，复制到新图形
-            if (this.selectedShape.userData.originalScale) {
-                newShape.userData.originalScale = this.selectedShape.userData.originalScale.clone();
-                newShape.scale.copy(this.selectedShape.userData.originalScale);
+            // 检查右侧是否有足够空间
+            if (newPosition.x + originalSize.x/2 + margin > gridSize) {
+                // 尝试左侧
+                offset = new THREE.Vector3(-(originalSize.x + 1), 0, 0);
+                newPosition = this.selectedShape.position.clone().add(offset);
+                
+                if (newPosition.x - originalSize.x/2 - margin < 0) {
+                    // 尝试前方
+                    offset = new THREE.Vector3(0, 0, originalSize.z + 1);
+                    newPosition = this.selectedShape.position.clone().add(offset);
+                    
+                    if (newPosition.z + originalSize.z/2 + margin > gridSize) {
+                        // 尝试后方
+                        offset = new THREE.Vector3(0, 0, -(originalSize.z + 1));
+                        newPosition = this.selectedShape.position.clone().add(offset);
+                        
+                        if (newPosition.z - originalSize.z/2 - margin < 0) {
+                            // 如果所有方向都不够，就在中心附近随机放置
+                            const randomX = (Math.random() - 0.5) * 6;
+                            const randomZ = (Math.random() - 0.5) * 6;
+                            newPosition = new THREE.Vector3(10 + randomX, this.selectedShape.position.y, 10 + randomZ);
+                        }
+                    }
+                }
             }
+            
+            // 最终边界检查，确保图形完全在网格范围内
+            const halfSizeX = originalSize.x / 2;
+            const halfSizeZ = originalSize.z / 2;
+            newPosition.x = Math.max(halfSizeX + margin, Math.min(gridSize - halfSizeX - margin, newPosition.x));
+            newPosition.y = Math.max(originalSize.y / 2, newPosition.y);
+            newPosition.z = Math.max(halfSizeZ + margin, Math.min(gridSize - halfSizeZ - margin, newPosition.z));
+            
+            // 直接克隆当前图形（包括切割后的几何体）
+            const newShape = this.selectedShape.clone();
+            newShape.material = this.selectedShape.material.clone();
+            newShape.geometry = this.selectedShape.geometry.clone();
+            
+            // 设置新位置
+            newShape.position.copy(newPosition);
+            
+            // 生成新的ID
+            this.shapeCounter++;
+            const newShapeId = `shape_${this.shapeCounter}`;
+            newShape.userData.id = newShapeId;
+            
+            // 添加到场景和shapes映射
+            this.scene.add(newShape);
+            this.shapes.set(newShapeId, newShape);
+            
+            // 如果启用了线框模式，为新图形创建线框
+            if (this.wireframeMode) {
+                this.createWireframeForMesh(newShape, newShapeId);
+            }
+            
+            // 记录到历史
+            this.addToHistory('create', {
+                shapeId: newShapeId,
+                type: newShape.userData.type,
+                position: newPosition.clone()
+            });
+            
+            // 更新图形列表
+            this.updateShapesList();
+            
+            this.showTooltip('图形已复制（包含所有修改）', 1500);
         }
     }
     
@@ -2027,24 +2292,103 @@ class Shape3DViewer {
         }
     }
     
+    // 保存图形状态的辅助方法
+    saveShapeState(mesh) {
+        return {
+            position: mesh.position.clone(),
+            rotation: mesh.rotation.clone(),
+            scale: mesh.scale.clone(),
+            color: mesh.material.color.getHex(),
+            geometry: mesh.geometry.clone(),
+            userData: JSON.parse(JSON.stringify(mesh.userData))
+        };
+    }
+    
+    // 恢复图形状态的辅助方法
+    restoreShapeState(mesh, state) {
+        mesh.position.copy(state.position);
+        mesh.rotation.copy(state.rotation);
+        mesh.scale.copy(state.scale);
+        mesh.material.color.setHex(state.color);
+        mesh.geometry = state.geometry;
+        mesh.userData = state.userData;
+    }
+    
     undo() {
         if (this.historyIndex >= 0) {
             const operation = this.operationHistory[this.historyIndex];
             
             switch (operation.action) {
                 case 'create':
-                    this.removeShape(operation.data.shapeId);
+                    // 删除创建的图形（不记录到历史中）
+                    const mesh = this.shapes.get(operation.data.shapeId);
+                    if (mesh) {
+                        this.scene.remove(mesh);
+                        this.shapes.delete(operation.data.shapeId);
+                        this.removeWireframeForMesh(operation.data.shapeId);
+                        if (this.selectedShape === mesh) {
+                            this.deselectShape();
+                        }
+                    }
                     break;
+                    
                 case 'remove':
                     // 重新创建被删除的图形
-                    const mesh = operation.data.mesh;
-                    this.scene.add(mesh);
-                    this.shapes.set(operation.data.shapeId, mesh);
+                    const restoredMesh = operation.data.mesh.clone();
+                    restoredMesh.material = restoredMesh.material.clone();
+                    this.scene.add(restoredMesh);
+                    this.shapes.set(operation.data.shapeId, restoredMesh);
+                    if (this.wireframeMode) {
+                        this.createWireframeForMesh(restoredMesh, operation.data.shapeId);
+                    }
+                    break;
+                    
+                case 'move':
+                    // 恢复移动前的位置
+                    const moveMesh = this.shapes.get(operation.data.shapeId);
+                    if (moveMesh) {
+                        moveMesh.position.copy(operation.data.oldPosition);
+                    }
+                    break;
+                    
+                case 'scale':
+                    // 恢复缩放前的状态
+                    const scaleMesh = this.shapes.get(operation.data.shapeId);
+                    if (scaleMesh) {
+                        scaleMesh.scale.copy(operation.data.oldScale);
+                    }
+                    break;
+                    
+                case 'color':
+                    // 恢复颜色变化前的状态
+                    const colorMesh = this.shapes.get(operation.data.shapeId);
+                    if (colorMesh) {
+                        colorMesh.material.color.setHex(operation.data.oldColor);
+                    }
+                    break;
+                    
+                case 'cut':
+                    // 恢复切割前的几何体
+                    const cutMesh = this.shapes.get(operation.data.shapeId);
+                    if (cutMesh && operation.data.oldGeometry) {
+                        cutMesh.geometry = operation.data.oldGeometry.clone();
+                    }
+                    break;
+                    
+                case 'transform':
+                    // 恢复完整的变换状态
+                    const transformMesh = this.shapes.get(operation.data.shapeId);
+                    if (transformMesh) {
+                        this.restoreShapeState(transformMesh, operation.data.oldState);
+                    }
                     break;
             }
             
             this.historyIndex--;
             this.updateShapesList();
+            this.showTooltip('已撤销操作', 1000);
+        } else {
+            this.showTooltip('没有可撤销的操作', 1000);
         }
     }
     
@@ -2055,12 +2399,72 @@ class Shape3DViewer {
             
             switch (operation.action) {
                 case 'create':
-                    this.createShape(operation.data.type, operation.data.position);
+                    // 重新创建图形
+                    const newMesh = this.createShape(operation.data.type, operation.data.position);
+                    // 恢复原始ID
+                    newMesh.userData.id = operation.data.shapeId;
+                    this.shapes.delete(newMesh.userData.id);
+                    this.shapes.set(operation.data.shapeId, newMesh);
                     break;
+                    
                 case 'remove':
-                    this.removeShape(operation.data.shapeId);
+                    // 重新删除图形
+                    const mesh = this.shapes.get(operation.data.shapeId);
+                    if (mesh) {
+                        this.scene.remove(mesh);
+                        this.shapes.delete(operation.data.shapeId);
+                        this.removeWireframeForMesh(operation.data.shapeId);
+                        if (this.selectedShape === mesh) {
+                            this.deselectShape();
+                        }
+                    }
+                    break;
+                    
+                case 'move':
+                    // 重新应用移动
+                    const moveMesh = this.shapes.get(operation.data.shapeId);
+                    if (moveMesh) {
+                        moveMesh.position.copy(operation.data.newPosition);
+                    }
+                    break;
+                    
+                case 'scale':
+                    // 重新应用缩放
+                    const scaleMesh = this.shapes.get(operation.data.shapeId);
+                    if (scaleMesh) {
+                        scaleMesh.scale.copy(operation.data.newScale);
+                    }
+                    break;
+                    
+                case 'color':
+                    // 重新应用颜色变化
+                    const colorMesh = this.shapes.get(operation.data.shapeId);
+                    if (colorMesh) {
+                        colorMesh.material.color.setHex(operation.data.newColor);
+                    }
+                    break;
+                    
+                case 'cut':
+                    // 重新应用切割
+                    const cutMesh = this.shapes.get(operation.data.shapeId);
+                    if (cutMesh && operation.data.newGeometry) {
+                        cutMesh.geometry = operation.data.newGeometry.clone();
+                    }
+                    break;
+                    
+                case 'transform':
+                    // 重新应用完整的变换状态
+                    const transformMesh = this.shapes.get(operation.data.shapeId);
+                    if (transformMesh) {
+                        this.restoreShapeState(transformMesh, operation.data.newState);
+                    }
                     break;
             }
+            
+            this.updateShapesList();
+            this.showTooltip('已重做操作', 1000);
+        } else {
+            this.showTooltip('没有可重做的操作', 1000);
         }
     }
     
@@ -2075,14 +2479,23 @@ class Shape3DViewer {
                 // 获取当前图形的颜色
                 const currentColor = mesh.material.color.getHexString();
                 
+                // 检查是否为彩虹颜色
+                const isRainbow = mesh.userData.isRainbow;
+                const rainbowButtonStyle = isRainbow ? 
+                    'background: linear-gradient(45deg, #ff0000, #ff8000, #ffff00, #80ff00, #00ff00, #00ff80, #00ffff, #0080ff, #0000ff, #8000ff, #ff00ff, #ff0080); color: white;' : 
+                    'background: #ddd; color: #666;';
+                
                 item.innerHTML = `
                     <div style="display: flex; align-items: center; justify-content: space-between; padding: 5px; border: 1px solid #ddd; border-radius: 3px; margin-bottom: 3px;">
                         <span style="cursor: pointer; flex: 1;" onclick="viewer.selectShape(viewer.shapes.get(${id}))">${mesh.userData.type} #${id}</span>
-                        <div style="display: flex; align-items: center; gap: 5px;">
+                        <div style="display: flex; align-items: center; gap: 3px;">
                             <input type="color" value="#${currentColor}" 
                                    onchange="viewer.updateShapeColor(${id}, this.value)" 
-                                   style="width: 30px; height: 25px; border: none; border-radius: 3px; cursor: pointer;" 
+                                   style="width: 25px; height: 20px; border: none; border-radius: 3px; cursor: pointer;" 
                                    title="选择颜色">
+                            <button onclick="viewer.setShapeRainbow(${id})" 
+                                    style="padding: 2px 4px; font-size: 10px; border: none; border-radius: 3px; cursor: pointer; ${rainbowButtonStyle}"
+                                    title="${isRainbow ? '取消彩虹' : '设为彩虹'}">🌈</button>
                             <button onclick="viewer.removeShape(${id})" 
                                     style="padding: 2px 6px; font-size: 12px; background: #ff4757; color: white; border: none; border-radius: 3px; cursor: pointer;"
                                     title="删除图形">删除</button>
@@ -2095,10 +2508,10 @@ class Shape3DViewer {
     }
     
     setupEventListeners() {
-        // 图形选择
-        document.getElementById('shapeSelect').addEventListener('change', (e) => {
-            this.createShape(e.target.value);
-        });
+        // 图形选择 - 移除自动创建，只在点击添加按钮时创建
+        // document.getElementById('shapeSelect').addEventListener('change', (e) => {
+        //     this.createShape(e.target.value);
+        // });
         
         // 移除了截面控制功能
         
@@ -2207,8 +2620,25 @@ class Shape3DViewer {
         // 颜色变化
         document.getElementById('colorSelect').addEventListener('change', () => {
             if (this.selectedShape) {
+                const beforeState = this.saveShapeState(this.selectedShape);
                 const newMaterial = this.createMaterial();
                 this.selectedShape.material = newMaterial;
+                
+                // 更新图形的彩虹状态
+                const colorSelect = document.getElementById('colorSelect');
+                this.selectedShape.userData.isRainbow = (colorSelect.value === 'rainbow');
+                
+                const afterState = this.saveShapeState(this.selectedShape);
+                
+                this.addToHistory({
+                    type: 'color',
+                    shapeId: this.selectedShape.userData.id,
+                    beforeState: beforeState,
+                    afterState: afterState
+                });
+                
+                // 更新图形列表显示
+                this.updateShapesList();
             }
         });
         
@@ -2238,13 +2668,61 @@ class Shape3DViewer {
             });
         }
         
+        // 快速设置切割方向按钮
+        const quickCuttingXBtn = document.getElementById('quickCuttingX');
+        if (quickCuttingXBtn) {
+            quickCuttingXBtn.addEventListener('click', () => {
+                this.setQuickCuttingDirection('x');
+            });
+        }
+        
+        const quickCuttingYBtn = document.getElementById('quickCuttingY');
+        if (quickCuttingYBtn) {
+            quickCuttingYBtn.addEventListener('click', () => {
+                this.setQuickCuttingDirection('y');
+            });
+        }
+        
+        const quickCuttingZBtn = document.getElementById('quickCuttingZ');
+        if (quickCuttingZBtn) {
+            quickCuttingZBtn.addEventListener('click', () => {
+                this.setQuickCuttingDirection('z');
+            });
+        }
+        
         // 图形大小控制事件监听器
         ['scaleX', 'scaleY', 'scaleZ'].forEach(id => {
             const element = document.getElementById(id);
             if (element) {
+                let scaleStartState = null;
+                let scaleTimeout = null;
+                
+                element.addEventListener('mousedown', () => {
+                    if (this.selectedShape) {
+                        scaleStartState = this.saveShapeState(this.selectedShape);
+                    }
+                });
+                
                 element.addEventListener('input', (e) => {
                     this.updateShapeScale(id, parseFloat(e.target.value));
                     document.getElementById(id + 'Value').textContent = parseFloat(e.target.value).toFixed(1);
+                    
+                    // 使用防抖技术，在用户停止拖拽500ms后记录历史
+                    if (scaleTimeout) {
+                        clearTimeout(scaleTimeout);
+                    }
+                    scaleTimeout = setTimeout(() => {
+                        if (this.selectedShape && scaleStartState) {
+                            const endState = this.saveShapeState(this.selectedShape);
+                            this.addToHistory({
+                                type: 'scale',
+                                shapeId: this.selectedShape.userData.id,
+                                beforeState: scaleStartState,
+                                afterState: endState
+                            });
+                            scaleStartState = null;
+                        }
+                    }, 500);
                 });
             }
         });
@@ -2284,10 +2762,24 @@ class Shape3DViewer {
             });
         }
 
-        const loadConfigBtn = document.getElementById('loadConfig');
+        // 单个配置文件选择
+        const loadSingleConfigBtn = document.getElementById('loadSingleConfig');
+        const singleConfigInput = document.getElementById('singleConfigInput');
+        if (loadSingleConfigBtn && singleConfigInput) {
+            loadSingleConfigBtn.addEventListener('click', () => {
+                singleConfigInput.click();
+            });
+
+            singleConfigInput.addEventListener('change', (e) => {
+                this.loadSingleConfigurationFile(e.target.files[0]);
+            });
+        }
+
+        // 配置文件夹选择
+        const loadConfigFolderBtn = document.getElementById('loadConfigFolder');
         const configFolderInput = document.getElementById('configFolderInput');
-        if (loadConfigBtn && configFolderInput) {
-            loadConfigBtn.addEventListener('click', () => {
+        if (loadConfigFolderBtn && configFolderInput) {
+            loadConfigFolderBtn.addEventListener('click', () => {
                 configFolderInput.click();
             });
 
@@ -2296,6 +2788,58 @@ class Shape3DViewer {
             });
         }
 
+        // 布尔运算事件监听器
+        const toggleBooleanBtn = document.getElementById('toggleBoolean');
+        if (toggleBooleanBtn) {
+            toggleBooleanBtn.addEventListener('click', () => {
+                this.toggleBooleanMode();
+            });
+        }
+
+        const executeBooleanBtn = document.getElementById('executeBoolean');
+        if (executeBooleanBtn) {
+            executeBooleanBtn.addEventListener('click', () => {
+                this.executeBooleanOperation();
+            });
+        }
+
+        const cancelBooleanBtn = document.getElementById('cancelBoolean');
+        if (cancelBooleanBtn) {
+            cancelBooleanBtn.addEventListener('click', () => {
+                this.cancelBooleanOperation();
+            });
+        }
+
+        // 最小化按钮事件监听器
+        this.setupMinimizeButtons();
+
+    }
+    
+    // 设置最小化按钮功能
+    setupMinimizeButtons() {
+        // 控制面板最小化按钮
+        const controlsMinimizeBtn = document.getElementById('controlsMinimizeBtn');
+        const controlsPanel = document.getElementById('controls');
+        
+        if (controlsMinimizeBtn && controlsPanel) {
+            controlsMinimizeBtn.addEventListener('click', () => {
+                controlsPanel.classList.toggle('minimized');
+                controlsMinimizeBtn.textContent = controlsPanel.classList.contains('minimized') ? '+' : '−';
+                controlsMinimizeBtn.title = controlsPanel.classList.contains('minimized') ? '展开工具栏' : '最小化工具栏';
+            });
+        }
+        
+        // 信息面板最小化按钮
+        const infoMinimizeBtn = document.getElementById('infoMinimizeBtn');
+        const infoPanel = document.getElementById('info');
+        
+        if (infoMinimizeBtn && infoPanel) {
+            infoMinimizeBtn.addEventListener('click', () => {
+                infoPanel.classList.toggle('minimized');
+                infoMinimizeBtn.textContent = infoPanel.classList.contains('minimized') ? '+' : '−';
+                infoMinimizeBtn.title = infoPanel.classList.contains('minimized') ? '展开操作提示' : '最小化操作提示';
+            });
+        }
     }
     
     animate() {
@@ -2313,16 +2857,18 @@ class Shape3DViewer {
                 this.controls.update();
             }
             
-            // 减少彩虹动画频率
-            if (this.currentMesh && document.getElementById('colorSelect').value === 'rainbow') {
-                // 每10帧更新一次颜色
-                if (!this.rainbowFrameCounter) this.rainbowFrameCounter = 0;
-                this.rainbowFrameCounter++;
-                if (this.rainbowFrameCounter % 10 === 0) {
-                    const time = Date.now() * 0.001;
-                    this.currentMesh.material.color.setHSL((time * 0.05) % 1, 0.7, 0.6);
+            // 减少彩虹动画频率 - 应用到所有彩虹颜色的图形
+        if (!this.rainbowFrameCounter) this.rainbowFrameCounter = 0;
+        this.rainbowFrameCounter++;
+        if (this.rainbowFrameCounter % 10 === 0) {
+            const time = Date.now() * 0.001;
+            // 更新所有彩虹颜色的图形
+            this.shapes.forEach((mesh) => {
+                if (mesh && mesh.material && mesh.userData.isRainbow) {
+                    mesh.material.color.setHSL((time * 0.05) % 1, 0.7, 0.6);
                 }
-            }
+            });
+        }
             
             // 减少选择框更新频率
             const box = this.scene.getObjectByName('selectionBox');
@@ -2337,11 +2883,13 @@ class Shape3DViewer {
             // 桌面设备保持原有的高频率更新
             this.controls.update();
             
-            // 彩虹模式的颜色动画
-            if (this.currentMesh && document.getElementById('colorSelect').value === 'rainbow') {
-                const time = Date.now() * 0.001;
-                this.currentMesh.material.color.setHSL((time * 0.1) % 1, 0.7, 0.6);
-            }
+            // 彩虹模式的颜色动画 - 应用到所有彩虹颜色的图形
+            const time = Date.now() * 0.001;
+            this.shapes.forEach((mesh) => {
+                if (mesh && mesh.material && mesh.userData.isRainbow) {
+                    mesh.material.color.setHSL((time * 0.1) % 1, 0.7, 0.6);
+                }
+            });
             
             // 更新选择框
             const box = this.scene.getObjectByName('selectionBox');
@@ -2474,6 +3022,40 @@ class Shape3DViewer {
         }
     }
 
+    // 加载单个配置文件
+    loadSingleConfigurationFile(file) {
+        if (!file) return;
+
+        const configList = document.getElementById('configList');
+        const configListGroup = document.getElementById('configListGroup');
+        if (!configList || !configListGroup) return;
+
+        // 清空现有列表
+        configList.innerHTML = '';
+        this.configFiles.clear();
+
+        if (!file.name.endsWith('.json')) {
+            this.showTooltip('请选择JSON格式的配置文件', 1500);
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const config = JSON.parse(e.target.result);
+                this.configFiles.set(file.name, config);
+                this.addConfigToList(file.name, config, '');
+                configListGroup.style.display = 'block';
+                this.showTooltip(`成功加载配置文件: ${file.name}`, 2000);
+            } catch (error) {
+                console.error(`解析配置文件 ${file.name} 失败:`, error);
+                this.showTooltip('配置文件格式错误，请检查文件内容', 2000);
+            }
+        };
+        reader.readAsText(file);
+    }
+
+    // 加载配置文件夹（支持子文件夹结构）
     loadConfigurationFiles(files) {
         if (!files || files.length === 0) return;
 
@@ -2485,7 +3067,7 @@ class Shape3DViewer {
         configList.innerHTML = '';
         this.configFiles.clear();
 
-        // 处理每个文件
+        // 处理每个文件，按文件夹结构组织
         let loadedCount = 0;
         const jsonFiles = Array.from(files).filter(file => file.name.endsWith('.json'));
         
@@ -2494,52 +3076,199 @@ class Shape3DViewer {
             return;
         }
 
+        // 按文件夹路径分组
+        const filesByFolder = new Map();
         jsonFiles.forEach(file => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                try {
-                    const config = JSON.parse(e.target.result);
-                    this.configFiles.set(file.name, config);
-                    this.addConfigToList(file.name, config);
-                    loadedCount++;
-                    
-                    // 当所有文件都加载完成时显示列表
-                    if (loadedCount === jsonFiles.length) {
-                        configListGroup.style.display = 'block';
-                        this.showTooltip(`成功加载 ${loadedCount} 个配置文件`, 2000);
+            const pathParts = file.webkitRelativePath.split('/');
+            const folderPath = pathParts.slice(0, -1).join('/') || '根目录';
+            
+            if (!filesByFolder.has(folderPath)) {
+                filesByFolder.set(folderPath, []);
+            }
+            filesByFolder.get(folderPath).push(file);
+        });
+
+        // 存储所有配置数据，用于分组显示
+        const allConfigs = [];
+        
+        // 按文件夹分组加载
+        filesByFolder.forEach((files, folderPath) => {
+            files.forEach(file => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const config = JSON.parse(e.target.result);
+                        const uniqueKey = folderPath !== '根目录' ? `${folderPath}/${file.name}` : file.name;
+                        this.configFiles.set(uniqueKey, config);
+                        
+                        allConfigs.push({
+                            filename: file.name,
+                            config: config,
+                            folderPath: folderPath,
+                            uniqueKey: uniqueKey
+                        });
+                        
+                        loadedCount++;
+                        
+                        // 当所有文件都加载完成时按文件夹分组显示
+                        if (loadedCount === jsonFiles.length) {
+                            this.displayConfigsByFolder(allConfigs, filesByFolder);
+                            configListGroup.style.display = 'block';
+                            this.showTooltip(`成功加载 ${loadedCount} 个配置文件，来自 ${filesByFolder.size} 个文件夹`, 2000);
+                        }
+                    } catch (error) {
+                        console.error(`解析配置文件 ${file.name} 失败:`, error);
+                        loadedCount++;
+                        if (loadedCount === jsonFiles.length && this.configFiles.size > 0) {
+                            configListGroup.style.display = 'block';
+                        }
                     }
-                } catch (error) {
-                    console.error(`解析配置文件 ${file.name} 失败:`, error);
-                    loadedCount++;
-                    if (loadedCount === jsonFiles.length && this.configFiles.size > 0) {
-                        configListGroup.style.display = 'block';
-                    }
-                }
-            };
-            reader.readAsText(file);
+                };
+                reader.readAsText(file);
+            });
         });
 
         this.showTooltip(`正在加载 ${jsonFiles.length} 个配置文件...`, 1500);
     }
 
-    addConfigToList(filename, config) {
+    // 按文件夹分组显示配置文件
+    displayConfigsByFolder(allConfigs, filesByFolder) {
+        const configList = document.getElementById('configList');
+        if (!configList) return;
+
+        // 按文件夹路径排序
+        const sortedFolders = Array.from(filesByFolder.keys()).sort();
+        
+        sortedFolders.forEach(folderPath => {
+            // 如果有多个文件夹，添加文件夹标题
+            if (filesByFolder.size > 1) {
+                const folderHeader = document.createElement('div');
+                folderHeader.className = 'folder-header';
+                folderHeader.style.cssText = `
+                    background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+                    padding: 8px 12px;
+                    margin: 10px 0 5px 0;
+                    border-radius: 5px;
+                    border-left: 4px solid #2196f3;
+                    font-weight: bold;
+                    color: #1565c0;
+                    font-size: 12px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                `;
+                
+                const folderIcon = folderPath === '根目录' ? '🏠' : '📁';
+                const displayPath = folderPath === '根目录' ? '根目录' : folderPath;
+                const fileCount = filesByFolder.get(folderPath).length;
+                
+                folderHeader.innerHTML = `${folderIcon} ${displayPath} <span style="color: #666; font-weight: normal;">(${fileCount} 个文件)</span>`;
+                configList.appendChild(folderHeader);
+            }
+            
+            // 添加该文件夹下的配置文件
+            const folderConfigs = allConfigs.filter(item => item.folderPath === folderPath);
+            folderConfigs.sort((a, b) => a.filename.localeCompare(b.filename));
+            
+            folderConfigs.forEach(item => {
+                this.addConfigToList(item.filename, item.config, item.folderPath, item.uniqueKey);
+            });
+        });
+    }
+
+    addConfigToList(filename, config, folderPath = '', uniqueKey = null) {
         const configList = document.getElementById('configList');
         if (!configList) return;
 
         const listItem = document.createElement('div');
-        listItem.className = 'config-item';
+        listItem.className = 'config-item file-item';
+        listItem.style.cssText = `
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 5px 0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: all 0.2s ease;
+        `;
+        
+        // 鼠标悬停效果
+        listItem.addEventListener('mouseenter', () => {
+            listItem.style.background = '#e3f2fd';
+            listItem.style.borderColor = '#2196f3';
+        });
+        listItem.addEventListener('mouseleave', () => {
+            listItem.style.background = '#f8f9fa';
+            listItem.style.borderColor = '#e9ecef';
+        });
         
         const timestamp = config.timestamp ? new Date(config.timestamp).toLocaleString('zh-CN') : '未知时间';
         const shapeCount = config.shapes ? config.shapes.length : 0;
         
-        listItem.innerHTML = `
-            <div class="config-info">
-                <div class="config-name">${filename}</div>
-                <div class="config-details">创建时间: ${timestamp} | 图形数量: ${shapeCount}</div>
-            </div>
-            <button class="load-config-btn" onclick="viewer.loadConfiguration('${filename}')">加载</button>
+        // 使用传入的uniqueKey或构建配置键
+        const configKey = uniqueKey || (folderPath && folderPath !== '根目录' ? `${folderPath}/${filename}` : filename);
+        
+        const configInfo = document.createElement('div');
+        configInfo.className = 'config-info';
+        configInfo.style.flex = '1';
+        
+        const configName = document.createElement('div');
+        configName.className = 'config-name';
+        configName.style.cssText = `
+            font-weight: 500;
+            color: #333;
+            margin-bottom: 4px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        `;
+        configName.innerHTML = `📄 ${filename}`;
+        
+        const configDetails = document.createElement('div');
+        configDetails.className = 'config-details';
+        configDetails.style.cssText = `
+            font-size: 11px;
+            color: #666;
+            line-height: 1.3;
+        `;
+        configDetails.innerHTML = `
+            <div>📊 图形数量: ${shapeCount}</div>
+            <div>🕒 创建时间: ${timestamp}</div>
         `;
         
+        const loadButton = document.createElement('button');
+        loadButton.className = 'load-config-btn';
+        loadButton.textContent = '加载';
+        loadButton.style.cssText = `
+            background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            min-width: 50px;
+        `;
+        
+        loadButton.addEventListener('mouseenter', () => {
+            loadButton.style.background = 'linear-gradient(135deg, #45a049 0%, #3d8b40 100%)';
+            loadButton.style.transform = 'translateY(-1px)';
+        });
+        loadButton.addEventListener('mouseleave', () => {
+            loadButton.style.background = 'linear-gradient(135deg, #4caf50 0%, #45a049 100%)';
+            loadButton.style.transform = 'translateY(0)';
+        });
+        
+        loadButton.onclick = () => this.loadConfiguration(configKey);
+        
+        configInfo.appendChild(configName);
+        configInfo.appendChild(configDetails);
+        listItem.appendChild(configInfo);
+        listItem.appendChild(loadButton);
         configList.appendChild(listItem);
     }
 
@@ -2983,6 +3712,71 @@ class Shape3DViewer {
             }
         }
         
+        // 生成切割面
+        const capVertices = [];
+        const capIndices = [];
+        const capNormals = [];
+        const capUVs = [];
+        
+        // 收集所有在切割平面上的边
+        const edgesOnPlane = [];
+        
+        // 重新遍历原始三角形，找到与平面相交的边
+        if (!indexAttribute) {
+            for (let i = 0; i < positions.length; i += 9) {
+                const triangle = [
+                    new THREE.Vector3(positions[i], positions[i+1], positions[i+2]),
+                    new THREE.Vector3(positions[i+3], positions[i+4], positions[i+5]),
+                    new THREE.Vector3(positions[i+6], positions[i+7], positions[i+8])
+                ];
+                
+                this.findPlaneIntersectionEdges(triangle, localPlane, edgesOnPlane);
+            }
+        } else {
+            const indexArray = indexAttribute.array;
+            for (let i = 0; i < indexArray.length; i += 3) {
+                const i1 = indexArray[i];
+                const i2 = indexArray[i + 1];
+                const i3 = indexArray[i + 2];
+                
+                const triangle = [
+                    new THREE.Vector3(positions[i1*3], positions[i1*3+1], positions[i1*3+2]),
+                    new THREE.Vector3(positions[i2*3], positions[i2*3+1], positions[i2*3+2]),
+                    new THREE.Vector3(positions[i3*3], positions[i3*3+1], positions[i3*3+2])
+                ];
+                
+                this.findPlaneIntersectionEdges(triangle, localPlane, edgesOnPlane);
+            }
+        }
+        
+        // 如果有足够的边，尝试生成切割面
+        if (edgesOnPlane.length >= 3) {
+            const capGeometry = this.generateCapGeometry(edgesOnPlane, localPlane);
+            if (capGeometry.vertices.length > 0) {
+                const capStartIndex = vertices.length / 3;
+                
+                // 添加切割面顶点
+                capGeometry.vertices.forEach(vertex => {
+                    vertices.push(vertex.x, vertex.y, vertex.z);
+                });
+                
+                // 添加切割面法向量
+                capGeometry.normals.forEach(normal => {
+                    normals.push(normal.x, normal.y, normal.z);
+                });
+                
+                // 添加切割面UV
+                capGeometry.uvs.forEach(uv => {
+                    uvs.push(uv.x, uv.y);
+                });
+                
+                // 添加切割面索引
+                capGeometry.indices.forEach(index => {
+                    indices.push(capStartIndex + index);
+                });
+            }
+        }
+        
         // 创建新的几何体
         if (vertices.length > 0) {
             const newGeometry = new THREE.BufferGeometry();
@@ -3136,6 +3930,397 @@ class Shape3DViewer {
           const v1 = triangle[1].clone().sub(triangle[0]);
           const v2 = triangle[2].clone().sub(triangle[0]);
           return v1.cross(v2).normalize();
+      }
+      
+      // 找到三角形与平面相交的边
+      findPlaneIntersectionEdges(triangle, plane, edgesOnPlane) {
+          const epsilon = 0.0001;
+          const distances = triangle.map(vertex => plane.distanceToPoint(vertex));
+          
+          for (let i = 0; i < 3; i++) {
+              const current = triangle[i];
+              const next = triangle[(i + 1) % 3];
+              const currentDist = distances[i];
+              const nextDist = distances[(i + 1) % 3];
+              
+              // 如果边跨越平面，计算交点
+              if ((currentDist > epsilon && nextDist < -epsilon) || (currentDist < -epsilon && nextDist > epsilon)) {
+                  const t = Math.abs(currentDist) / (Math.abs(currentDist) + Math.abs(nextDist));
+                  const intersection = current.clone().lerp(next, t);
+                  edgesOnPlane.push(intersection);
+              }
+          }
+      }
+      
+      // 生成切割面几何体
+      generateCapGeometry(edgePoints, plane) {
+          if (edgePoints.length < 3) {
+              return { vertices: [], normals: [], uvs: [], indices: [] };
+          }
+          
+          // 移除重复点
+          const uniquePoints = [];
+          const epsilon = 0.001;
+          
+          edgePoints.forEach(point => {
+              let isDuplicate = false;
+              for (let existing of uniquePoints) {
+                  if (point.distanceTo(existing) < epsilon) {
+                      isDuplicate = true;
+                      break;
+                  }
+              }
+              if (!isDuplicate) {
+                  uniquePoints.push(point.clone());
+              }
+          });
+          
+          if (uniquePoints.length < 3) {
+              return { vertices: [], normals: [], uvs: [], indices: [] };
+          }
+          
+          // 计算切割面的中心点
+          const center = new THREE.Vector3();
+          uniquePoints.forEach(point => center.add(point));
+          center.divideScalar(uniquePoints.length);
+          
+          // 将点投影到平面上并排序
+          const planeNormal = plane.normal.clone();
+          const u = new THREE.Vector3();
+          const v = new THREE.Vector3();
+          
+          // 创建平面的局部坐标系
+          if (Math.abs(planeNormal.x) < 0.9) {
+              u.set(1, 0, 0).cross(planeNormal).normalize();
+          } else {
+              u.set(0, 1, 0).cross(planeNormal).normalize();
+          }
+          v.crossVectors(planeNormal, u);
+          
+          // 将3D点转换为2D点并按角度排序
+          const points2D = uniquePoints.map(point => {
+              const relative = point.clone().sub(center);
+              const x = relative.dot(u);
+              const y = relative.dot(v);
+              const angle = Math.atan2(y, x);
+              return { point3D: point, x, y, angle };
+          });
+          
+          points2D.sort((a, b) => a.angle - b.angle);
+          
+          // 生成三角形扇形
+          const vertices = [];
+          const normals = [];
+          const uvs = [];
+          const indices = [];
+          
+          // 添加中心点
+          vertices.push(center);
+          normals.push(planeNormal.clone());
+          uvs.push(new THREE.Vector2(0.5, 0.5));
+          
+          // 添加边界点
+          points2D.forEach((point2D, index) => {
+              vertices.push(point2D.point3D);
+              normals.push(planeNormal.clone());
+              
+              // 生成UV坐标
+              const u = (point2D.x + 1) * 0.5;
+              const v = (point2D.y + 1) * 0.5;
+              uvs.push(new THREE.Vector2(u, v));
+          });
+          
+          // 生成三角形索引
+          for (let i = 0; i < points2D.length; i++) {
+              const next = (i + 1) % points2D.length;
+              indices.push(0, i + 1, next + 1);
+          }
+          
+          return {
+              vertices,
+              normals,
+              uvs,
+              indices
+          };
+      }
+      
+      // 布尔运算相关方法
+      toggleBooleanMode() {
+          this.booleanMode = !this.booleanMode;
+          const toggleBtn = document.getElementById('toggleBoolean');
+          const booleanPanel = document.getElementById('booleanPanel');
+          
+          if (this.booleanMode) {
+              toggleBtn.textContent = '退出布尔运算';
+              toggleBtn.style.backgroundColor = '#dc3545';
+              booleanPanel.style.display = 'block';
+              this.updateBooleanShapesList();
+              this.showTooltip('布尔运算模式已启用，请选择两个图形进行运算', 3000);
+          } else {
+              toggleBtn.textContent = '布尔运算';
+              toggleBtn.style.backgroundColor = '#007bff';
+              booleanPanel.style.display = 'none';
+              this.cancelBooleanOperation();
+              this.showTooltip('布尔运算模式已关闭', 1500);
+          }
+      }
+      
+      updateBooleanShapesList() {
+          const mainShapeSelect = document.getElementById('booleanMainShape');
+          const toolShapeSelect = document.getElementById('booleanToolShape');
+          
+          if (!mainShapeSelect || !toolShapeSelect) return;
+          
+          // 清空现有选项
+          mainShapeSelect.innerHTML = '<option value="">选择主体图形</option>';
+          toolShapeSelect.innerHTML = '<option value="">选择工具图形</option>';
+          
+          // 添加所有图形到选项中
+          this.shapes.forEach((mesh, id) => {
+              const option1 = document.createElement('option');
+              option1.value = id;
+              option1.textContent = `图形 ${id} (${mesh.userData.type})`;
+              mainShapeSelect.appendChild(option1);
+              
+              const option2 = document.createElement('option');
+              option2.value = id;
+              option2.textContent = `图形 ${id} (${mesh.userData.type})`;
+              toolShapeSelect.appendChild(option2);
+          });
+      }
+      
+      executeBooleanOperation() {
+          const mainShapeId = document.getElementById('booleanMainShape')?.value;
+          const toolShapeId = document.getElementById('booleanToolShape')?.value;
+          const operation = document.getElementById('booleanOperation')?.value || 'subtract';
+          
+          if (!mainShapeId || !toolShapeId) {
+              this.showTooltip('请选择主体图形和工具图形', 2000);
+              return;
+          }
+          
+          if (mainShapeId === toolShapeId) {
+              this.showTooltip('主体图形和工具图形不能是同一个', 2000);
+              return;
+          }
+          
+          // 将字符串ID转换为数字，因为shapes Map使用数字作为键
+          const mainShapeNumId = parseInt(mainShapeId);
+          const toolShapeNumId = parseInt(toolShapeId);
+          
+          const mainShape = this.shapes.get(mainShapeNumId);
+          const toolShape = this.shapes.get(toolShapeNumId);
+          
+          if (!mainShape || !toolShape) {
+              this.showTooltip('选择的图形不存在', 2000);
+              return;
+          }
+          
+          try {
+              // 执行布尔运算
+              const resultGeometry = this.performBooleanOperation(mainShape.geometry, toolShape.geometry, operation);
+              
+              if (resultGeometry) {
+                  // 创建新的网格
+                  const material = mainShape.material.clone();
+                  const resultMesh = new THREE.Mesh(resultGeometry, material);
+                  
+                  // 设置位置为主体图形的位置
+                  resultMesh.position.copy(mainShape.position);
+                  resultMesh.rotation.copy(mainShape.rotation);
+                  resultMesh.scale.copy(mainShape.scale);
+                  
+                  // 设置用户数据
+                  resultMesh.userData = {
+                      id: `boolean_${Date.now()}`,
+                      type: `${operation}_result`,
+                      originalMainShape: mainShapeNumId,
+                      originalToolShape: toolShapeNumId,
+                      created: new Date().toLocaleTimeString(),
+                      originalScale: resultMesh.scale.clone()
+                  };
+                  
+                  // 添加到场景
+                  this.scene.add(resultMesh);
+                  this.shapes.set(resultMesh.userData.id, resultMesh);
+                  
+                  // 移除原始图形
+                  this.scene.remove(mainShape);
+                  this.scene.remove(toolShape);
+                  this.shapes.delete(mainShapeNumId);
+                  this.shapes.delete(toolShapeNumId);
+                  
+                  // 选择新图形
+                  this.selectShape(resultMesh);
+                  
+                  // 更新界面
+                  this.updateShapesList();
+                  this.updateBooleanShapesList();
+                  
+                  const operationNames = {
+                      'subtract': '减法',
+                      'union': '并集',
+                      'intersect': '交集'
+                  };
+                  
+                  this.showTooltip(`布尔${operationNames[operation]}运算完成`, 2000);
+              } else {
+                  this.showTooltip('布尔运算失败，请检查图形是否相交', 2000);
+              }
+          } catch (error) {
+              console.error('布尔运算错误:', error);
+              this.showTooltip('布尔运算出现错误', 2000);
+          }
+      }
+      
+      performBooleanOperation(geometry1, geometry2, operation) {
+          // 简化的布尔运算实现
+          // 注意：这是一个基础实现，真正的CSG需要更复杂的算法
+          
+          try {
+              // 获取几何体的顶点
+              const vertices1 = this.getGeometryVertices(geometry1);
+              const vertices2 = this.getGeometryVertices(geometry2);
+              
+              if (vertices1.length === 0 || vertices2.length === 0) {
+                  return null;
+              }
+              
+              let resultVertices = [];
+              
+              switch (operation) {
+                  case 'subtract':
+                      // 减法：保留geometry1中不在geometry2内部的部分
+                      resultVertices = this.subtractGeometry(vertices1, vertices2);
+                      break;
+                  case 'union':
+                      // 并集：合并两个几何体
+                      resultVertices = this.unionGeometry(vertices1, vertices2);
+                      break;
+                  case 'intersect':
+                      // 交集：保留两个几何体重叠的部分
+                      resultVertices = this.intersectGeometry(vertices1, vertices2);
+                      break;
+                  default:
+                      return null;
+              }
+              
+              if (resultVertices.length < 9) { // 至少需要3个三角形
+                  return null;
+              }
+              
+              // 创建新的几何体
+              const resultGeometry = new THREE.BufferGeometry();
+              resultGeometry.setAttribute('position', new THREE.Float32BufferAttribute(resultVertices, 3));
+              resultGeometry.computeVertexNormals();
+              resultGeometry.computeBoundingBox();
+              resultGeometry.computeBoundingSphere();
+              
+              return resultGeometry;
+          } catch (error) {
+              console.error('布尔运算处理错误:', error);
+              return null;
+          }
+      }
+      
+      getGeometryVertices(geometry) {
+          const vertices = [];
+          const position = geometry.attributes.position;
+          
+          if (position) {
+              for (let i = 0; i < position.count; i++) {
+                  vertices.push(
+                      position.getX(i),
+                      position.getY(i),
+                      position.getZ(i)
+                  );
+              }
+          }
+          
+          return vertices;
+      }
+      
+      subtractGeometry(vertices1, vertices2) {
+          // 简化的减法实现：移除vertices1中接近vertices2的顶点
+          const threshold = 0.5;
+          const result = [];
+          
+          for (let i = 0; i < vertices1.length; i += 9) { // 每个三角形9个值
+              const triangle = [
+                  new THREE.Vector3(vertices1[i], vertices1[i+1], vertices1[i+2]),
+                  new THREE.Vector3(vertices1[i+3], vertices1[i+4], vertices1[i+5]),
+                  new THREE.Vector3(vertices1[i+6], vertices1[i+7], vertices1[i+8])
+              ];
+              
+              // 检查三角形中心是否在第二个几何体内部
+              const center = triangle[0].clone().add(triangle[1]).add(triangle[2]).divideScalar(3);
+              
+              let isInside = false;
+              for (let j = 0; j < vertices2.length; j += 9) {
+                  const center2 = new THREE.Vector3(
+                      (vertices2[j] + vertices2[j+3] + vertices2[j+6]) / 3,
+                      (vertices2[j+1] + vertices2[j+4] + vertices2[j+7]) / 3,
+                      (vertices2[j+2] + vertices2[j+5] + vertices2[j+8]) / 3
+                  );
+                  
+                  if (center.distanceTo(center2) < threshold) {
+                      isInside = true;
+                      break;
+                  }
+              }
+              
+              if (!isInside) {
+                  result.push(...vertices1.slice(i, i + 9));
+              }
+          }
+          
+          return result;
+      }
+      
+      unionGeometry(vertices1, vertices2) {
+          // 简化的并集实现：合并两个几何体的顶点
+          return [...vertices1, ...vertices2];
+      }
+      
+      intersectGeometry(vertices1, vertices2) {
+          // 简化的交集实现：保留接近的三角形
+          const threshold = 0.5;
+          const result = [];
+          
+          for (let i = 0; i < vertices1.length; i += 9) {
+              const center1 = new THREE.Vector3(
+                  (vertices1[i] + vertices1[i+3] + vertices1[i+6]) / 3,
+                  (vertices1[i+1] + vertices1[i+4] + vertices1[i+7]) / 3,
+                  (vertices1[i+2] + vertices1[i+5] + vertices1[i+8]) / 3
+              );
+              
+              for (let j = 0; j < vertices2.length; j += 9) {
+                  const center2 = new THREE.Vector3(
+                      (vertices2[j] + vertices2[j+3] + vertices2[j+6]) / 3,
+                      (vertices2[j+1] + vertices2[j+4] + vertices2[j+7]) / 3,
+                      (vertices2[j+2] + vertices2[j+5] + vertices2[j+8]) / 3
+                  );
+                  
+                  if (center1.distanceTo(center2) < threshold) {
+                      result.push(...vertices1.slice(i, i + 9));
+                      break;
+                  }
+              }
+          }
+          
+          return result;
+      }
+      
+      cancelBooleanOperation() {
+          this.booleanMainShape = null;
+          this.booleanToolShape = null;
+          
+          // 重置选择
+          const mainShapeSelect = document.getElementById('booleanMainShape');
+          const toolShapeSelect = document.getElementById('booleanToolShape');
+          
+          if (mainShapeSelect) mainShapeSelect.value = '';
+          if (toolShapeSelect) toolShapeSelect.value = '';
       }
   }
 
